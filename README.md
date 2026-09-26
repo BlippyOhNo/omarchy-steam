@@ -12,8 +12,9 @@ A bar widget for [Omarchy](https://omarchy.org)'s shell that puts Steam in a pop
   popup: trailers and screenshots, description, reviews, tags, Steam Deck status, system
   requirements and the most helpful reviews. Buying opens Steam.
 - **Recent**: your recently played, installed games. Click to play.
-- **Library**: everything you own, searchable (`/`). Uninstalled games install to the drive of
-  your choice.
+- **Library**: everything you own, searchable (`/`). Tick **Most played** to sort by hours or
+  **Uninstalled** to show only games you haven't installed. Uninstalled games install to the
+  drive of your choice.
 - **Downloads**: live progress, speed and time left, with pause/resume. Collapse the section
   with its header or `d`.
 - **Friends**: who's online and what they're playing, with chat in the popup.

@@ -38,6 +38,10 @@ Panel {
   property string errorText: ""
   property string friendsError: ""
   property string filterText: ""
+  // Library ticks under the search field: most played first (played
+  // games only) and uninstalled only.
+  property bool mostPlayed: false
+  property bool uninstalledOnly: false
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
@@ -80,18 +84,19 @@ Panel {
   }
 
   readonly property var libraryGames: {
-    var recent = {}
-    for (var i = 0; i < recentGames.length; i++) recent[recentGames[i].appid] = true
     var q = filterText.trim().toLowerCase()
     var out = []
     for (var j = 0; j < games.length; j++) {
       var g = games[j]
-      if (recent[g.appid] && q === "") continue
       if (q !== "" && g.name.toLowerCase().indexOf(q) < 0) continue
+      if (uninstalledOnly && g.installed) continue
+      if (mostPlayed && !(g.playtime > 0)) continue
       out.push(g)
     }
+    // Most played: by hours. Otherwise installed first, then by name.
     out.sort(function(a, b) {
-      if (a.installed !== b.installed) return a.installed ? -1 : 1
+      if (mostPlayed && a.playtime !== b.playtime) return b.playtime - a.playtime
+      if (!mostPlayed && a.installed !== b.installed) return a.installed ? -1 : 1
       return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1
     })
     return out
@@ -199,9 +204,54 @@ Panel {
     return parts.join(" · ")
   }
 
+  // Library filter checkbox: filled box when on, empty and dimmed when off.
+  component FilterTick: Item {
+    id: tick
+    property string label: ""
+    property bool checked: false
+    property color foreground
+    property color dim
+    property string fontFamily
+    signal toggled()
+    implicitWidth: tickRow.implicitWidth
+
+    Row {
+      id: tickRow
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(4)
+
+      Text {
+        text: tick.checked ? "󰄲" : "󰄱"
+        color: tick.checked || tickMouse.containsMouse ? tick.foreground : tick.dim
+        font.family: tick.fontFamily
+        font.pixelSize: Style.font.body
+        anchors.verticalCenter: parent.verticalCenter
+      }
+
+      Text {
+        text: tick.label
+        textFormat: Text.PlainText
+        color: tick.checked || tickMouse.containsMouse ? tick.foreground : tick.dim
+        font.family: tick.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        anchors.verticalCenter: parent.verticalCenter
+      }
+    }
+
+    MouseArea {
+      id: tickMouse
+      anchors.fill: parent
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: tick.toggled()
+    }
+  }
+
   onTabChanged: { rowIndex = 0; armedUninstall = 0; list.positionViewAtBeginning(); if (tab === "store") refreshStoreLists() }
   onStoreKindChanged: { rowIndex = 0; list.positionViewAtBeginning() }
   onFilterTextChanged: rowIndex = 0
+  onMostPlayedChanged: { rowIndex = 0; list.positionViewAtBeginning() }
+  onUninstalledOnlyChanged: { rowIndex = 0; list.positionViewAtBeginning() }
 
   // ---------- data ----------
   function refreshGames() { if (!gamesProc.running) gamesProc.running = true }
@@ -1196,33 +1246,65 @@ Panel {
           onChanged: function(v) { root.storeKind = v }
         }
 
-        TextField {
-          id: filterField
+        ColumnLayout {
           Layout.fillWidth: true
           visible: root.tab === "library"
-          placeholderText: "Search " + root.games.length + " games  (/)"
-          foreground: root.foreground
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.bodySmall
-          onTextEdited: root.filterText = text
-          onVisibleChanged: if (!visible && activeFocus) keyCatcher.forceActiveFocus()
+          spacing: Style.space(6)
 
-          Keys.onPressed: function(event) {
-            if (event.key === Qt.Key_Escape) {
-              if (text !== "") { text = ""; root.filterText = "" }
-              else root.close()
-              event.accepted = true
-            } else if (event.key === Qt.Key_Down || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-              keyCatcher.forceActiveFocus()
-              root.cursorActive = true
-              root.rowIndex = 0
-              if (event.key !== Qt.Key_Down && root.rows.length) root.activateRow(root.rows[0])
-              event.accepted = true
-            } else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
-              keyCatcher.forceActiveFocus()
-              root.switchPanel(event.key === Qt.Key_Backtab || (event.modifiers & Qt.ShiftModifier) ? -1 : 1)
-              event.accepted = true
+          TextField {
+            id: filterField
+            Layout.fillWidth: true
+            placeholderText: "Search " + root.games.length + " games  (/)"
+            foreground: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            onTextEdited: root.filterText = text
+            onVisibleChanged: if (!visible && activeFocus) keyCatcher.forceActiveFocus()
+  
+            Keys.onPressed: function(event) {
+              if (event.key === Qt.Key_Escape) {
+                if (text !== "") { text = ""; root.filterText = "" }
+                else root.close()
+                event.accepted = true
+              } else if (event.key === Qt.Key_Down || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                keyCatcher.forceActiveFocus()
+                root.cursorActive = true
+                root.rowIndex = 0
+                if (event.key !== Qt.Key_Down && root.rows.length) root.activateRow(root.rows[0])
+                event.accepted = true
+              } else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+                keyCatcher.forceActiveFocus()
+                root.switchPanel(event.key === Qt.Key_Backtab || (event.modifiers & Qt.ShiftModifier) ? -1 : 1)
+                event.accepted = true
+              }
             }
+          }
+
+          RowLayout {
+          Layout.fillWidth: true
+          spacing: Style.space(14)
+
+          FilterTick {
+            label: "Most played"
+            implicitHeight: filterField.height
+            foreground: root.foreground
+            dim: root.dim
+            fontFamily: root.fontFamily
+            checked: root.mostPlayed
+            onToggled: root.mostPlayed = !root.mostPlayed
+          }
+
+          FilterTick {
+            label: "Uninstalled"
+            implicitHeight: filterField.height
+            foreground: root.foreground
+            dim: root.dim
+            fontFamily: root.fontFamily
+            checked: root.uninstalledOnly
+            onToggled: root.uninstalledOnly = !root.uninstalledOnly
+          }
+
+          Item { Layout.fillWidth: true }
           }
         }
 
@@ -1357,6 +1439,7 @@ Panel {
               : root.tab === "store" ? (root.storeListsLoaded ? "Couldn't load the store" : "Loading the Steam store…")
               : !root.gamesLoaded ? "Reading your library…"
               : root.tab === "library" && root.filterText !== "" ? "No games match “" + root.filterText + "”"
+              : root.tab === "library" && (root.mostPlayed || root.uninstalledOnly) ? "No games match these filters"
               : root.tab === "recent" ? "No recently played games" : "No games"
             color: root.dim
             font.family: root.fontFamily
