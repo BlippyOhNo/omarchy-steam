@@ -439,6 +439,8 @@ Panel {
   property var installQueue: []
   property var pendingInstalls: ({})
   property var installing: null
+  // Last drawn progress-bar position per appid (see ProgressGlide).
+  property var glideState: ({})
 
   function installGame(game, folder) {
     if (!game) return
@@ -983,12 +985,13 @@ Panel {
     color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.25)
 
     Rectangle {
-      width: parent.width * (root.activeDownload ? root.activeDownload.progress : 0)
+      width: parent.width * barGlide.value
       height: parent.height
       radius: parent.radius
       color: root.foreground
-      Behavior on width { NumberAnimation { duration: 400 } }
     }
+
+    ProgressGlide { id: barGlide; download: root.activeDownload; active: parent.visible }
   }
 
   KeyboardPanel {
@@ -2817,6 +2820,50 @@ Panel {
     }
   }
 
+  // Smoothed progress for a download. Steam's figures arrive every couple of
+  // seconds and in bursts, so between samples this runs ahead at the current
+  // speed (at most a few seconds' worth) and eases toward that each frame.
+  component ProgressGlide: Item {
+    id: glide
+    property var download: null
+    property bool active: true
+    property real value: 0
+    property real sampledAt: 0
+    readonly property real progress: download ? download.progress : 0
+
+    // Rows are rebuilt on every poll, so carry the position over per appid
+    // instead of starting again from zero.
+    function restore() {
+      var st = download ? root.glideState[download.appid] : null
+      if (st && Math.abs(st.progress - progress) < 0.0001) { value = st.value; sampledAt = st.sampledAt }
+      else {
+        if (!st || Math.abs(st.value - progress) > 0.05) value = progress
+        else value = st.value
+        sampledAt = Date.now() / 1000
+      }
+    }
+    Component.onCompleted: restore()
+    onDownloadChanged: restore()
+    onActiveChanged: if (active) restore()
+
+    FrameAnimation {
+      running: glide.active && (Math.abs(glide.value - glide.progress) > 0.0001
+        || (!!glide.download && glide.download.status === "downloading" && glide.download.speed > 0))
+      onTriggered: {
+        var g = glide, d = g.download
+        var target = g.progress
+        if (d && d.status === "downloading" && d.speed > 0 && d.total > 0) {
+          var ahead = Math.min(Date.now() / 1000 - g.sampledAt, 3)
+          target = Math.min(1, g.progress + d.speed * ahead / d.total)
+        }
+        // Never slide backwards over a small overshoot; do follow a real drop.
+        if (!(target < g.value && g.value - target < 0.03 && d && d.status === "downloading"))
+          g.value += (target - g.value) * Math.min(1, frameTime * 3)
+        if (d) root.glideState[d.appid] = { value: g.value, progress: g.progress, sampledAt: g.sampledAt }
+      }
+    }
+  }
+
   component ProgressLine: Rectangle {
     property var download: null
     readonly property bool busy: !!download && (download.status === "installing" || download.status === "verifying"
@@ -2829,12 +2876,13 @@ Panel {
 
     Rectangle {
       visible: !parent.busy
-      width: parent.width * (parent.download ? parent.download.progress : 0)
+      width: parent.width * lineGlide.value
       height: parent.height
       radius: parent.radius
       color: parent.download && parent.download.status === "paused" ? root.dim : root.inGameColor
-      Behavior on width { NumberAnimation { duration: 600; easing.type: Easing.OutCubic } }
     }
+
+    ProgressGlide { id: lineGlide; download: parent.download; active: parent.visible && !parent.busy }
 
     // Indeterminate sweep while Steam is preparing, verifying or installing.
     Rectangle {

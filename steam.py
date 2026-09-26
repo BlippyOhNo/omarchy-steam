@@ -460,6 +460,33 @@ def steam_overview():
         return None
 
 
+TOOL_TYPES = ("tool", "config")
+
+
+def fold_tools(out, order):
+    """Show runtimes and other tools (Steam Linux Runtime, redistributables)
+    as part of the game they're downloading for, like Steam does. A tool
+    downloading on its own still gets its own entry."""
+    games = [d for d in out if d.get("type") not in TOOL_TYPES]
+    if not games:
+        return out
+    game = games[0]
+    for t in out:
+        if t.get("type") not in TOOL_TYPES:
+            continue
+        game["total"] += t["total"]
+        game["staged"] += t["staged"]
+        # While the tool is the one actually moving, the game is too.
+        if order.get(t["status"], 3) < order.get(game["status"], 3):
+            game["status"] = t["status"]
+        if t.get("speed") and not game.get("speed"):
+            game["speed"] = t["speed"]
+            game["eta"] = t.get("eta", 0)
+    if game["total"]:
+        game["progress"] = min(1.0, game["staged"] / game["total"])
+    return games
+
+
 def downloads():
     states = log_states()
     info = None
@@ -517,6 +544,7 @@ def downloads():
             d["eta"] = live.get("eta") if (live.get("eta") or -1) > 0 else 0
     order = {"downloading": 0, "installing": 0, "verifying": 0, "preparing": 0, "queued": 1, "paused": 2}
     out.sort(key=lambda d: (order.get(d["status"], 3), d["name"].lower()))
+    out = fold_tools(out, order)
     return {"downloads": out, "time": time.time(), "controllable": steam_reachable()}
 
 
