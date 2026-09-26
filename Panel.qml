@@ -151,6 +151,8 @@ Panel {
         var instant = Math.max(0, (d.staged - p.staged) / (now - p.time))
         // Light smoothing: Steam writes in bursts.
         speed = p.speed > 0 ? p.speed * 0.6 + instant * 0.4 : instant
+        // Stalled or restarted: don't let the smoothing trail off forever.
+        if (d.staged < p.staged || speed < 1024) speed = 0
       }
       d.speed = speed
       next[d.appid] = { staged: d.staged, time: now, speed: speed }
@@ -191,7 +193,8 @@ Panel {
     var parts = [done + " / " + total]
     if (d.speed > 0) {
       parts.push(sizeLabel(d.speed) + "/s")
-      if (withEta !== false) parts.push(etaLabel(downloadEta(d)))
+      var eta = downloadEta(d)
+      if (withEta !== false && isFinite(eta) && eta < 30 * 86400) parts.push(etaLabel(eta))
     }
     return parts.join(" · ")
   }
@@ -2664,7 +2667,7 @@ Panel {
           Text {
             readonly property var d: dl.download
             visible: text !== ""
-            text: d && d.status === "downloading" && d.speed > 0 && d.total ? root.etaLabel(root.downloadEta(d)).replace(" left", "") : ""
+            text: d && d.status === "downloading" && d.speed > 0 && d.total && root.downloadEta(d) < 30 * 86400 ? root.etaLabel(root.downloadEta(d)).replace(" left", "") : ""
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

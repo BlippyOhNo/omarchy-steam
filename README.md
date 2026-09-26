@@ -2,6 +2,11 @@
 
 A bar widget for [Omarchy](https://omarchy.org)'s shell that puts Steam in a popup:
 
+<p>
+  <img src="screenshots/tour.gif" alt="The Steam popup switching between the Store, Recent and Library tabs" height="340">
+  <img src="screenshots/store-page.gif" alt="Store pages with trailers open beside the list" height="340">
+</p>
+
 - **Store**: the store's top 50 sellers, popular upcoming games and popular new releases.
   Click a game you don't own (or press `i` on any game) to open its store page right in the
   popup: trailers and screenshots, description, reviews, tags, Steam Deck status, system

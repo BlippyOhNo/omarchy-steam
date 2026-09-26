@@ -542,6 +542,10 @@ def downloads():
             # Steam's own figures: network speed and its time-left estimate.
             d["speed"] = live.get("networkBytesPerSecond") or 0
             d["eta"] = live.get("eta") if (live.get("eta") or -1) > 0 else 0
+        # Nothing on disk and nothing coming in: Steam is between steps (a
+        # finished download's follow-up update, reconfiguring), not downloading.
+        if d["status"] == "downloading" and not d["staged"] and not d.get("speed"):
+            d["status"] = "preparing"
     order = {"downloading": 0, "installing": 0, "verifying": 0, "preparing": 0, "queued": 1, "paused": 2}
     out.sort(key=lambda d: (order.get(d["status"], 3), d["name"].lower()))
     out = fold_tools(out, order)
