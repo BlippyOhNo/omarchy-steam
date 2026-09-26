@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "id": "blip.steam",
+  "name": "Steam",
+  "version": "1.0.0",
+  "author": "blip",
+  "description": "Steam in your bar: the store with in-widget store pages, recent games, your library, downloads and friends with chat",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Steam",
+    "description": "Store, recent games, library, downloads and friends",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "center",
+    "defaults": {
+      "recentCount": 10,
+      "apiKey": "",
+      "installDrive": ""
+    },
+    "schema": [
+      {
+        "key": "recentCount",
+        "type": "integer",
+        "label": "Games in Recent",
+        "min": 3,
+        "max": 30,
+        "step": 1,
+        "defaultValue": 10
+      },
+      {
+        "key": "installDrive",
+        "type": "string",
+        "label": "Install new games to",
+        "defaultValue": "",
+        "description": "Part of the Steam library folder's path to install into when you click an uninstalled game (e.g. GAMES for /run/media/you/GAMES/SteamLibrary). Empty uses Steam's default folder. Each row's drive buttons can pick another."
+      },
+      {
+        "key": "apiKey",
+        "type": "string",
+        "label": "Steam Web API key (optional)",
+        "defaultValue": "",
+        "description": "From steamcommunity.com/dev/apikey. With a key, Friends shows your exact friend list and live status in one quick request; without one, status is read from each friend's public profile a few at a time."
+      }
+    ]
+  }
+}
