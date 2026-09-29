@@ -16,8 +16,8 @@ client's own UI uses. This is how Decky Loader talks to Steam too.
   steamctl.py friends               -> friend list with live presence and unread counts
   steamctl.py chat <accountid> [read]
                                     -> recent messages with a friend ("read" marks them read)
-  steamctl.py send <accountid> <text>
-                                    -> send a chat message
+  steamctl.py send <accountid>      -> send the chat message read from stdin
+                                       (never argv, where other users can see it)
   steamctl.py wizard-state          -> install wizard state (8 = showing a EULA)
   steamctl.py eval '<js>'           -> JSON result of the expression
 
@@ -428,7 +428,7 @@ def main(argv):
         read = "true" if len(argv) > 3 and argv[3] == "read" else "false"
         return evaluate(CHAT_JS % {"account": int(argv[2]), "read": read, "html": HTML_JS})
     if cmd == "send":
-        return evaluate(SEND_JS % {"account": int(argv[2]), "text": json.dumps(argv[3])})
+        return evaluate(SEND_JS % {"account": int(argv[2]), "text": json.dumps(sys.stdin.read())})
     if cmd == "wizard-state":
         return evaluate("SteamClient.Installs.GetInstallManagerInfo().then(i => i.eInstallState)")
     if cmd == "overview":

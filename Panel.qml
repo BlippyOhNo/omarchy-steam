@@ -423,7 +423,7 @@ Panel {
     // Shown straight away (dimmed) until Steam's copy comes back.
     chatMessages = chatMessages.concat([{ mine: true, text: text, ts: Date.now() / 1000,
       key: "local:" + Date.now(), pending: true, failed: false, showTime: false }])
-    runCtl(["send", chatFriend.accountid, text], function(ok, value, error) {
+    runCtl(["send", chatFriend.accountid], text, function(ok, value, error) {
       if (!ok) root.chatError = "Couldn't send: " + error
       root.refreshChat()
     })
@@ -457,8 +457,10 @@ Panel {
   // ---------- Steam client commands (steamctl.py) ----------
   property var ctlQueue: []
 
-  function runCtl(args, onDone) {
-    ctlQueue = ctlQueue.concat([{ args: args, onDone: onDone }])
+  // input, if given, goes to the helper's stdin rather than its argv.
+  function runCtl(args, input, onDone) {
+    if (typeof input === "function") { onDone = input; input = undefined }
+    ctlQueue = ctlQueue.concat([{ args: args, input: input, onDone: onDone }])
     if (!ctlProc.running) nextCtl()
   }
 
@@ -468,6 +470,7 @@ Panel {
     ctlQueue = ctlQueue.slice(1)
     ctlProc.job = job
     ctlProc.command = ["python3", root.ctlScript].concat(job.args)
+    ctlProc.stdinEnabled = job.input !== undefined
     ctlProc.running = true
   }
 
@@ -804,6 +807,13 @@ Panel {
   Process {
     id: ctlProc
     property var job: null
+    // Writing the input then closing stdin lets the helper read to EOF.
+    onStarted: {
+      if (job && job.input !== undefined) {
+        write(job.input)
+        stdinEnabled = false
+      }
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
