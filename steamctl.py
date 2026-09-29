@@ -33,13 +33,23 @@ import urllib.error
 import urllib.request
 
 PORT = 8080
+# Byte ceilings for what Steam's debug port hands back, and for what's
+# printed to the widget.
+MAX_TARGETS = 1024 * 1024
+MAX_MESSAGE = 16 * 1024 * 1024
+MAX_OUTPUT = 8 * 1024 * 1024
 
 
 def target_ws():
     with urllib.request.urlopen("http://127.0.0.1:%d/json" % PORT, timeout=3) as r:
-        pages = json.load(r)
+        pages = r.read(MAX_TARGETS + 1)
+    if len(pages) > MAX_TARGETS:
+        raise RuntimeError("Steam's debug target list is too large")
+    pages = json.loads(pages)
+    if not isinstance(pages, list):
+        raise RuntimeError("Steam's SharedJSContext isn't available")
     for p in pages:
-        if p.get("title") == "SharedJSContext":
+        if isinstance(p, dict) and p.get("title") == "SharedJSContext":
             return p["webSocketDebuggerUrl"]
     raise RuntimeError("Steam's SharedJSContext isn't available")
 
@@ -63,6 +73,8 @@ class WebSocket:
             if not chunk:
                 raise RuntimeError("websocket handshake failed")
             head += chunk
+            if len(head) > 16384:
+                raise RuntimeError("websocket handshake failed")
         if b" 101 " not in head.split(b"\r\n", 1)[0]:
             raise RuntimeError("websocket handshake refused")
 
@@ -96,6 +108,8 @@ class WebSocket:
                 n, = struct.unpack("!H", self._recv(2))
             elif n == 127:
                 n, = struct.unpack("!Q", self._recv(8))
+            if len(message) + n > MAX_MESSAGE:
+                raise RuntimeError("Steam's answer was too large")
             payload = self._recv(n)
             op = b1 & 0x0F
             if op == 8:
@@ -430,12 +444,15 @@ def main(argv):
 
 if __name__ == "__main__":
     try:
-        print(json.dumps({"ok": True, "value": main(sys.argv)}))
+        out = json.dumps({"ok": True, "value": main(sys.argv)})
+        if len(out) > MAX_OUTPUT:
+            raise RuntimeError("Steam's answer was too large to show")
+        print(out)
     except Exception as e:
         # Most likely Steam isn't running, or was started before the
         # debugging flag file existed.
         msg = str(e)
         if isinstance(e, (OSError, urllib.error.URLError)):
             msg = "Can't reach Steam. Is it running?"
-        print(json.dumps({"ok": False, "error": msg}))
+        print(json.dumps({"ok": False, "error": msg[:500]}))
         sys.exit(1)

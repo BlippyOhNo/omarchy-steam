@@ -45,6 +45,56 @@ CACHE = os.path.expanduser("~/.cache/blip-steam")
 STEAMID64_BASE = 76561197960265728
 
 
+# ---------- network ----------
+# Byte ceilings per response. Timeouts only bound time, so a huge (or
+# hostile) answer could otherwise fill memory here and then in the shell
+# that collects this script's output.
+KB, MB = 1024, 1024 * 1024
+MAX_PROFILE = 256 * KB      # a friend's mini-profile page
+MAX_JSON = 4 * MB           # Web API and store JSON answers
+MAX_SEARCH = 2 * MB         # one page of store search results
+MAX_IMAGE = 16 * MB         # description art converted from AVIF
+MAX_OUTPUT = 8 * MB         # everything printed for the widget
+
+
+def fetch(url, timeout=10, limit=MAX_JSON):
+    """A URL's body, refused once it passes `limit` bytes."""
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        length = r.headers.get("Content-Length")
+        if length and length.isdigit() and int(length) > limit:
+            raise ValueError("response too large (%s bytes)" % length)
+        data = r.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("response too large (over %d bytes)" % limit)
+    return data
+
+
+def fetch_json(url, timeout=10, limit=MAX_JSON):
+    data = json.loads(fetch(url, timeout, limit))
+    if not isinstance(data, dict):
+        raise ValueError("unexpected response")
+    return data
+
+
+def clip(value, n):
+    """A string from a response, cut to n characters."""
+    return value[:n] if isinstance(value, str) else ""
+
+
+def obj(value):
+    """A dict from a response, or an empty one."""
+    return value if isinstance(value, dict) else {}
+
+
+def number(value):
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+
+
+def seq(value, n):
+    """A list from a response, cut to n items."""
+    return value[:n] if isinstance(value, list) else []
+
+
 # ---------- text VDF ----------
 def parse_text_vdf(text):
     tokens = re.finditer(r'"((?:[^"\\]|\\.)*)"|([{}])', text)
@@ -265,52 +315,58 @@ def fetch_status(accountid):
     # Keep urllib's default User-Agent: Steam answers custom and browser-like
     # ones with HTTP 500.
     req = urllib.request.Request("https://steamcommunity.com/miniprofile/%s" % accountid)
-    with urllib.request.urlopen(req, timeout=8) as r:
-        page = r.read().decode("utf-8", "replace")
+    page = fetch(req, timeout=8, limit=MAX_PROFILE).decode("utf-8", "replace")
     state = re.search(r'class="persona\s+([\w-]+)"', page)
     name = re.search(r'class="persona[^"]*">([^<]*)<', page)
     status = re.search(r'class="friend_status_[\w-]+">([^<]*)<', page)
     game = re.search(r'class="miniprofile_game_name">([^<]*)<', page)
-    state = state.group(1) if state else "offline"
+    state = state.group(1)[:32] if state else "offline"
     status_text = html.unescape(status.group(1)).strip() if status else ""
     if state == "online" and re.search(r"away|snooze", status_text, re.I):
         state = "away"
     return {
         "state": state,
-        "name": html.unescape(name.group(1)).strip() if name else "",
-        "statusText": status_text,
-        "game": html.unescape(game.group(1)).strip() if game else "",
+        "name": clip(html.unescape(name.group(1)).strip(), MAX_NAME) if name else "",
+        "statusText": clip(status_text, MAX_NAME),
+        "game": clip(html.unescape(game.group(1)).strip(), MAX_NAME) if game else "",
     }
 
 
 API = "https://api.steampowered.com"
+MAX_FRIENDS = 2000   # well past Steam's own friend limit
+MAX_NAME = 256
+MAX_URL = 2048
 PERSONA = {0: "offline", 1: "online", 2: "busy", 3: "away", 4: "away", 5: "online", 6: "online"}
 
 
 def api_get(path, **params):
     q = "&".join("%s=%s" % (k, urllib.request.quote(str(v))) for k, v in params.items())
-    with urllib.request.urlopen("%s/%s?%s" % (API, path, q), timeout=10) as r:
-        return json.load(r)
+    return fetch_json("%s/%s?%s" % (API, path, q))
 
 
 def friends_from_api(key, user):
     """Friend list and presence from the Steam Web API (one request per 100)."""
     listing = api_get("ISteamUser/GetFriendList/v1/", key=key, steamid=user["steamid"], relationship="friend")
-    ids = [f["steamid"] for f in listing.get("friendslist", {}).get("friends", [])]
+    ids = [str(f["steamid"]) for f in seq(listing.get("friendslist", {}).get("friends"), MAX_FRIENDS)
+           if isinstance(f, dict) and str(f.get("steamid", "")).isdigit()]
     people = []
     for i in range(0, len(ids), 100):
         chunk = api_get("ISteamUser/GetPlayerSummaries/v2/", key=key, steamids=",".join(ids[i:i + 100]))
-        for p in chunk.get("response", {}).get("players", []):
-            state = "in-game" if p.get("gameextrainfo") else PERSONA.get(p.get("personastate", 0), "online")
+        for p in seq(chunk.get("response", {}).get("players"), 100):
+            if not isinstance(p, dict) or not str(p.get("steamid", "")).isdigit():
+                continue
+            persona = p.get("personastate", 0)
+            state = "in-game" if p.get("gameextrainfo") else \
+                PERSONA.get(persona, "online") if isinstance(persona, int) else "online"
             people.append({
-                "steamid": p["steamid"],
+                "steamid": str(p["steamid"]),
                 "accountid": str(int(p["steamid"]) - STEAMID64_BASE),
-                "name": p.get("personaname", ""),
-                "avatar": p.get("avatarmedium", ""),
+                "name": clip(p.get("personaname"), MAX_NAME),
+                "avatar": clip(p.get("avatarmedium"), MAX_URL),
                 "state": state,
                 "statusText": {"in-game": "In-Game", "offline": "Offline", "away": "Away", "busy": "Busy"}.get(state, "Online"),
-                "game": p.get("gameextrainfo", ""),
-                "lastOnline": p.get("lastlogoff", 0),
+                "game": clip(p.get("gameextrainfo"), MAX_NAME),
+                "lastOnline": p.get("lastlogoff", 0) if isinstance(p.get("lastlogoff"), int) else 0,
             })
     return people
 
@@ -325,11 +381,14 @@ def friends_from_community(user):
     for k, v in cfg.items() if isinstance(cfg, dict) else []:
         if k.isdigit() and isinstance(v, dict) and k != user["accountid"]:
             avatar = ci(v, "avatar")
+            if len(people) >= MAX_FRIENDS:
+                break
             people.append({
                 "accountid": k,
                 "steamid": str(int(k) + STEAMID64_BASE),
-                "name": ci(v, "name") or k,
-                "avatar": "https://avatars.fastly.steamstatic.com/%s_medium.jpg" % avatar if isinstance(avatar, str) and avatar else "",
+                "name": clip(ci(v, "name"), MAX_NAME) or k,
+                "avatar": "https://avatars.fastly.steamstatic.com/%s_medium.jpg" % avatar[:64]
+                          if isinstance(avatar, str) and avatar else "",
             })
 
     os.makedirs(CACHE, exist_ok=True)
@@ -584,18 +643,18 @@ def store_list(kind):
         for page in range(6):
             url = ("https://store.steampowered.com/search/results/?%s&infinite=1"
                    "&count=100&start=%d&cc=us&l=english" % (query, page * 100))
-            with urllib.request.urlopen(url, timeout=10) as r:
-                results = json.load(r).get("results_html", "")
+            results = clip(fetch_json(url, limit=MAX_SEARCH).get("results_html"), MAX_SEARCH)
             # Bundles list several appids; only single apps are ranked here.
             found = re.findall(r'<a [^>]*data-ds-appid="(\d+)"[^>]*>(.*?)</a>', results, re.S)
             for aid, inner in found:
                 released = re.search(r'search_released[^>]*>\s*([^<]*?)\s*<', inner)
-                released = html.unescape(released.group(1)) if released else ""
+                released = clip(html.unescape(released.group(1)), 64) if released else ""
                 if int(aid) in seen:
                     continue
                 seen.add(int(aid))
                 rows.append((int(aid), released))
             # A few extra make up for hardware and DLC dropped below.
+            rows = rows[:LIST_COUNT + 15]
             if len(rows) >= LIST_COUNT + 15 or len(found) < 50:
                 break
         request = {
@@ -609,24 +668,25 @@ def store_list(kind):
             return cached
         return {"error": "Couldn't reach the Steam store: %s" % e}
 
-    store = {i.get("appid"): i for i in items.get("response", {}).get("store_items", []) if i.get("success") == 1}
+    store = {i.get("appid"): i for i in seq(items.get("response", {}).get("store_items"), len(rows))
+             if isinstance(i, dict) and i.get("success") == 1}
     out = []
     for aid, released in rows:
         item = store.get(aid)
         if not item or item.get("type", 0) != 0 or not item.get("name"):  # type 0 = game
             continue
-        assets = item.get("assets", {})
-        fmt = assets.get("asset_url_format", "")
-        header = ("https://shared.fastly.steamstatic.com/store_item_assets/" + fmt.replace("${FILENAME}", assets["header"])
+        assets = item.get("assets") if isinstance(item.get("assets"), dict) else {}
+        fmt = clip(assets.get("asset_url_format"), MAX_URL)
+        header = ("https://shared.fastly.steamstatic.com/store_item_assets/" + fmt.replace("${FILENAME}", clip(assets["header"], 256))
                   if fmt and assets.get("header") else art_for(aid)[0])
-        offer = item.get("best_purchase_option", {})
+        offer = item.get("best_purchase_option") if isinstance(item.get("best_purchase_option"), dict) else {}
         out.append({
             "appid": aid,
-            "name": item["name"],
+            "name": clip(item["name"], MAX_NAME),
             "rank": len(out) + 1,
             "free": bool(item.get("is_free")),
-            "price": "Free" if item.get("is_free") else offer.get("formatted_final_price", ""),
-            "discount": offer.get("discount_pct", 0),
+            "price": "Free" if item.get("is_free") else clip(offer.get("formatted_final_price"), 64),
+            "discount": number(offer.get("discount_pct")),
             "released": released,
             "header": header,
         })
@@ -652,11 +712,6 @@ STORE_MAX_AGE = 6 * 3600
 DECK = {1: "Unsupported", 2: "Playable", 3: "Verified"}
 
 
-def fetch_json(url, timeout=10):
-    with urllib.request.urlopen(url, timeout=timeout) as r:
-        return json.load(r)
-
-
 def tag_names():
     """Steam's tag id -> name table, cached for a week."""
     path = os.path.join(CACHE, "tags.json")
@@ -666,8 +721,8 @@ def tag_names():
                 return {int(k): v for k, v in json.load(f).items()}
     except (OSError, ValueError):
         pass
-    tags = {t["tagid"]: t["name"] for t in api_get("IStoreService/GetTagList/v1/", language="english")
-            .get("response", {}).get("tags", [])}
+    tags = {t["tagid"]: clip(t.get("name"), 64) for t in seq(api_get("IStoreService/GetTagList/v1/", language="english")
+            .get("response", {}).get("tags"), 5000) if isinstance(t, dict) and isinstance(t.get("tagid"), int)}
     with open(path + ".tmp", "w") as f:
         json.dump(tags, f)
     os.replace(path + ".tmp", path)
@@ -685,8 +740,7 @@ def local_image(url):
     os.makedirs(folder, exist_ok=True)
     out = os.path.join(folder, hashlib.sha1(url.encode()).hexdigest() + ".webp")
     if not os.path.exists(out):
-        with urllib.request.urlopen(url, timeout=15) as r:
-            data = r.read()
+        data = fetch(url, timeout=15, limit=MAX_IMAGE)
         subprocess.run(["magick", "avif:-", out + ".tmp.webp"], input=data, check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
         os.replace(out + ".tmp.webp", out)
@@ -722,30 +776,41 @@ def plain(markup):
     return html.unescape(re.sub(r"<[^>]+>", " ", markup or "")).replace(" ,", ",").strip()
 
 
+MAX_ABOUT = 512 * KB   # description HTML considered
+MAX_TEXT = 32 * KB     # one text block, or a requirements section
+MAX_BLOCKS = 150
+MAX_IMAGES = 40        # description images converted per page
+MAX_MEDIA = 60         # trailers, and screenshots
+
+
 def description_blocks(markup):
     """The About section as text, image and video blocks in page order."""
     blocks, pos = [], 0
+    markup = markup[:MAX_ABOUT]
     media = re.compile(r"<img\b[^>]*>|<video\b.*?</video>", re.S | re.I)
     for m in list(media.finditer(markup)) + [None]:
         text = markup[pos:m.start()] if m else markup[pos:]
         text = styled(text)
         if plain(text):
-            blocks.append({"type": "text", "text": text})
-        if not m:
+            blocks.append({"type": "text", "text": text[:MAX_TEXT]})
+        if not m or len(blocks) >= MAX_BLOCKS:
             break
         pos = m.end()
         tag = m.group(0)
-        size = lambda k: int((re.search(k + r'\s*=\s*"?(\d+)', tag) or [0, 0])[1])
+        # Each image may be downloaded and converted, so only so many.
+        if sum(b["type"] != "text" for b in blocks) >= MAX_IMAGES:
+            continue
+        size = lambda k: int((re.search(k + r'\s*=\s*"?(\d{1,5})', tag) or [0, 0])[1])
         if tag.lower().startswith("<img"):
             src = re.search(r'src\s*=\s*"([^"]+)"', tag)
             if src:
-                blocks.append({"type": "image", "src": src.group(1), "w": size("width"), "h": size("height")})
+                blocks.append({"type": "image", "src": src.group(1)[:MAX_URL], "w": size("width"), "h": size("height")})
         else:
             srcs = re.findall(r'<source[^>]*src\s*=\s*"([^"]+)"', tag)
             poster = re.search(r'poster\s*=\s*"([^"]+)"', tag)
             mp4 = [x for x in srcs if ".mp4" in x] or srcs
             if mp4:
-                blocks.append({"type": "video", "src": mp4[0], "poster": poster.group(1) if poster else "",
+                blocks.append({"type": "video", "src": mp4[0][:MAX_URL], "poster": poster.group(1)[:MAX_URL] if poster else "",
                                "w": size("width"), "h": size("height")})
     return blocks
 
@@ -778,15 +843,15 @@ def store_page(appid):
         tags = pool.submit(tag_names)
         try:
             # Steam sometimes keys the answer by a package id instead of the app.
-            d = next(iter(details.result().values()))
+            d = obj(next(iter(details.result().values())))
         except Exception as e:
             return {"error": "Couldn't load the store page: %s" % e}
         if not d.get("success"):
             return {"error": "This game has no store page in your region"}
-        d = d["data"]
+        d = obj(d.get("data"))
         item, names, top = {}, {}, {}
         try:
-            item = browse.result()["response"]["store_items"][0]
+            item = obj(browse.result()["response"]["store_items"][0])
         except Exception:
             pass
         try:
@@ -811,60 +876,63 @@ def store_page(appid):
         list(pool.map(convert, about))
     about = [b for b in about if b["type"] != "image" or b["src"]]
 
-    price = d.get("price_overview", {})
-    summary = item.get("reviews", {}).get("summary_filtered", {})
-    english = item.get("reviews", {}).get("summary_language_specific", {})
-    platforms = item.get("platforms", {})
-    release = d.get("release_date", {})
+    price = obj(d.get("price_overview"))
+    reviews = obj(item.get("reviews"))
+    summary = obj(reviews.get("summary_filtered"))
+    english = obj(reviews.get("summary_language_specific"))
+    platforms = obj(item.get("platforms"))
+    release = obj(d.get("release_date"))
     movies = []
-    for m in d.get("movies", []):
-        src = m.get("hls_h264") or m.get("mp4", {}).get("max") or m.get("webm", {}).get("max")
-        if src:
-            movies.append({"type": "video", "src": src, "thumb": m.get("thumbnail", ""), "name": m.get("name", "")})
-    shots = [{"type": "image", "src": s["path_full"], "thumb": s["path_thumbnail"]} for s in d.get("screenshots", [])]
-    reqs = d.get("pc_requirements") or {}
-    if not isinstance(reqs, dict):
-        reqs = {}
+    for m in seq(d.get("movies"), MAX_MEDIA):
+        m = obj(m)
+        src = m.get("hls_h264") or obj(m.get("mp4")).get("max") or obj(m.get("webm")).get("max")
+        if isinstance(src, str) and src:
+            movies.append({"type": "video", "src": clip(src, MAX_URL), "thumb": clip(m.get("thumbnail"), MAX_URL),
+                           "name": clip(m.get("name"), MAX_NAME)})
+    shots = [{"type": "image", "src": clip(s.get("path_full"), MAX_URL), "thumb": clip(s.get("path_thumbnail"), MAX_URL)}
+             for s in seq(d.get("screenshots"), MAX_MEDIA) if isinstance(s, dict)]
+    reqs = obj(d.get("pc_requirements"))
+    names_of = lambda v, key, n: [clip(obj(x).get(key) if key else x, MAX_NAME) for x in seq(v, n)]
     result = {
         "appid": appid,
-        "name": d.get("name", ""),
-        "header": d.get("header_image", ""),
-        "short": plain(d.get("short_description", "")),
+        "name": clip(d.get("name"), MAX_NAME),
+        "header": clip(d.get("header_image"), MAX_URL),
+        "short": plain(clip(d.get("short_description"), MAX_TEXT)),
         "free": bool(d.get("is_free")),
-        "price": "Free to Play" if d.get("is_free") else price.get("final_formatted", ""),
-        "initialPrice": price.get("initial_formatted", ""),
-        "discount": price.get("discount_percent", 0),
+        "price": "Free to Play" if d.get("is_free") else clip(price.get("final_formatted"), 64),
+        "initialPrice": clip(price.get("initial_formatted"), 64),
+        "discount": number(price.get("discount_percent")),
         "comingSoon": bool(release.get("coming_soon")),
-        "releaseDate": release.get("date", ""),
+        "releaseDate": clip(release.get("date"), 64),
         "earlyAccess": bool(item.get("is_early_access")),
-        "developers": d.get("developers", []),
-        "publishers": d.get("publishers", []),
-        "reviews": {"label": summary.get("review_score_label", ""), "percent": summary.get("percent_positive", 0),
-                    "count": summary.get("review_count", 0)},
-        "englishReviews": {"label": english.get("review_score_label", ""), "percent": english.get("percent_positive", 0),
-                           "count": english.get("review_count", 0)},
+        "developers": names_of(d.get("developers"), None, 10),
+        "publishers": names_of(d.get("publishers"), None, 10),
+        "reviews": {"label": clip(summary.get("review_score_label"), 64), "percent": number(summary.get("percent_positive")),
+                    "count": number(summary.get("review_count"))},
+        "englishReviews": {"label": clip(english.get("review_score_label"), 64),
+                           "percent": number(english.get("percent_positive")), "count": number(english.get("review_count"))},
         "topReviews": [{
             "up": bool(r.get("voted_up")),
-            "text": r.get("review", "")[:700].strip() + ("…" if len(r.get("review", "")) > 700 else ""),
-            "hours": round(r.get("author", {}).get("playtime_forever", 0) / 60, 1),
-            "helpful": r.get("votes_up", 0),
-            "date": r.get("timestamp_created", 0),
-        } for r in top.get("reviews", [])],
-        "tags": [names[t["tagid"]] for t in item.get("tags", []) if t.get("tagid") in names],
-        "genres": [g["description"] for g in d.get("genres", [])],
-        "features": list(dict.fromkeys(c["description"] for c in d.get("categories", []))),
-        "platforms": d.get("platforms", {}),
-        "deck": DECK.get(platforms.get("steam_deck_compat_category", 0), ""),
-        "steamos": DECK.get(platforms.get("steam_os_compat_category", 0), ""),
-        "languages": re.sub(r"\s*\*?\s*languages with full audio support$", "", plain(d.get("supported_languages", "")))
+            "text": clip(r.get("review"), 700).strip() + ("…" if len(clip(r.get("review"), 701)) > 700 else ""),
+            "hours": round(number(obj(r.get("author")).get("playtime_forever")) / 60, 1),
+            "helpful": number(r.get("votes_up")),
+            "date": number(r.get("timestamp_created")),
+        } for r in seq(top.get("reviews"), 10) if isinstance(r, dict)],
+        "tags": [names[t["tagid"]] for t in seq(item.get("tags"), 50) if isinstance(t, dict) and t.get("tagid") in names],
+        "genres": names_of(d.get("genres"), "description", 30),
+        "features": list(dict.fromkeys(names_of(d.get("categories"), "description", 60))),
+        "platforms": {k: bool(obj(d.get("platforms")).get(k)) for k in ("windows", "mac", "linux")},
+        "deck": DECK.get(number(platforms.get("steam_deck_compat_category")), ""),
+        "steamos": DECK.get(number(platforms.get("steam_os_compat_category")), ""),
+        "languages": re.sub(r"\s*\*?\s*languages with full audio support$", "", plain(clip(d.get("supported_languages"), MAX_TEXT)))
                      .replace(" *", "*").rstrip("* "),
-        "achievements": d.get("achievements", {}).get("total", 0),
-        "dlc": len(d.get("dlc", [])),
-        "contentNotes": (d.get("content_descriptors") or {}).get("notes") or "",
+        "achievements": number(obj(d.get("achievements")).get("total")),
+        "dlc": len(seq(d.get("dlc"), 100000)),
+        "contentNotes": clip(obj(d.get("content_descriptors")).get("notes"), 4096),
         "media": movies + shots,
         "about": about,
-        "minimum": styled(reqs.get("minimum", "")),
-        "recommended": styled(reqs.get("recommended", "")),
+        "minimum": styled(clip(reqs.get("minimum"), MAX_TEXT)),
+        "recommended": styled(clip(reqs.get("recommended"), MAX_TEXT)),
     }
     with open(path + ".tmp", "w") as f:
         json.dump(result, f)
@@ -879,5 +947,8 @@ if __name__ == "__main__":
                   else friends() if mode == "friends" else downloads() if mode == "downloads"
                   else store_lists() if mode == "storelists" else games())
     except Exception as e:  # report instead of crashing the widget
-        result = {"error": str(e)}
-    json.dump(result, sys.stdout, ensure_ascii=False)
+        result = {"error": str(e)[:500]}
+    out = json.dumps(result, ensure_ascii=False)
+    if len(out.encode("utf-8")) > MAX_OUTPUT:
+        out = json.dumps({"error": "Steam's answer was too large to show"})
+    sys.stdout.write(out)
