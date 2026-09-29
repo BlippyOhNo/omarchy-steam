@@ -21,6 +21,7 @@ import os
 import re
 import struct
 import sys
+import threading
 import time
 import urllib.request
 
@@ -729,6 +730,22 @@ def tag_names():
     return tags
 
 
+# A few KB of AVIF can declare a huge canvas or thousands of frames, so the
+# download cap alone doesn't bound decoding. ImageMagick refuses anything past
+# these before allocating pixels, never spills to disk, and prlimit backs that
+# up with address-space and file-size ceilings. Steam's tallest description
+# art is around 1400x8200, and animations are a few hundred small frames.
+CONVERT_LIMITS = [
+    "-limit", "width", "8192", "-limit", "height", "16384",
+    "-limit", "area", "24MP", "-limit", "list-length", "600",
+    "-limit", "memory", "256MiB", "-limit", "map", "256MiB",
+    "-limit", "disk", "0", "-limit", "thread", "1", "-limit", "time", "60",
+]
+CONVERT_AS = 4 * 1024 * MB     # virtual; the AV1 decoder reserves a stack per core
+CONVERT_FSIZE = 64 * MB
+CONVERT_SLOTS = threading.Semaphore(2)   # conversions at once
+
+
 def local_image(url):
     """Qt here can't decode AVIF, which is all Steam serves for description
     art, so those are converted to WebP (animation kept) in the cache."""
@@ -741,9 +758,16 @@ def local_image(url):
     out = os.path.join(folder, hashlib.sha1(url.encode()).hexdigest() + ".webp")
     if not os.path.exists(out):
         data = fetch(url, timeout=15, limit=MAX_IMAGE)
-        subprocess.run(["magick", "avif:-", out + ".tmp.webp"], input=data, check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
-        os.replace(out + ".tmp.webp", out)
+        tmp = "%s.%d.%d.tmp.webp" % (out, os.getpid(), threading.get_ident())
+        try:
+            with CONVERT_SLOTS:
+                subprocess.run(["prlimit", "--as=%d" % CONVERT_AS, "--fsize=%d" % CONVERT_FSIZE, "--",
+                                "magick", *CONVERT_LIMITS, "avif:-", tmp], input=data, check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+            os.replace(tmp, out)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
     return out
 
 
