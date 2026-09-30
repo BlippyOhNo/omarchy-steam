@@ -24,6 +24,7 @@ import sys
 import threading
 import time
 import urllib.request
+from urllib.parse import urlsplit
 
 
 
@@ -61,6 +62,54 @@ MAX_OUTPUT = 8 * MB         # everything printed for the widget
 def fetch(url, timeout=10, limit=MAX_JSON):
     """A URL's body, refused once it passes `limit` bytes."""
     with urllib.request.urlopen(url, timeout=timeout) as r:
+        length = r.headers.get("Content-Length")
+        if length and length.isdigit() and int(length) > limit:
+            raise ValueError("response too large (%s bytes)" % length)
+        data = r.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("response too large (over %d bytes)" % limit)
+    return data
+
+
+# Description HTML is supplied by game publishers, so image URLs must stay on
+# Steam's image CDNs. Redirects are checked too: validating only the first URL
+# would still allow an approved host to redirect a request to localhost.
+STEAM_IMAGE_HOSTS = frozenset({
+    "cdn.akamai.steamstatic.com",
+    "shared.akamai.steamstatic.com",
+    "shared.fastly.steamstatic.com",
+    "cdn.cloudflare.steamstatic.com",
+    "shared.cloudflare.steamstatic.com",
+    "steamcdn-a.akamaihd.net",
+    "steamuserimages-a.akamaihd.net",
+})
+
+
+def validate_steam_image_url(url):
+    """Reject non-HTTPS and non-Steam destinations in publisher content."""
+    try:
+        parsed = urlsplit(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError("invalid Steam image URL")
+    if (parsed.scheme != "https" or host not in STEAM_IMAGE_HOSTS
+            or parsed.username is not None or parsed.password is not None
+            or port not in (None, 443)):
+        raise ValueError("image URL is not on an approved Steam CDN")
+
+
+class SteamImageRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        validate_steam_image_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def fetch_steam_image(url, timeout=15, limit=MAX_IMAGE):
+    """Fetch a bounded image only from approved Steam CDN URLs."""
+    validate_steam_image_url(url)
+    opener = urllib.request.build_opener(SteamImageRedirectHandler())
+    with opener.open(url, timeout=timeout) as r:
         length = r.headers.get("Content-Length")
         if length and length.isdigit() and int(length) > limit:
             raise ValueError("response too large (%s bytes)" % length)
@@ -757,7 +806,7 @@ def local_image(url):
     os.makedirs(folder, exist_ok=True)
     out = os.path.join(folder, hashlib.sha1(url.encode()).hexdigest() + ".webp")
     if not os.path.exists(out):
-        data = fetch(url, timeout=15, limit=MAX_IMAGE)
+        data = fetch_steam_image(url, timeout=15, limit=MAX_IMAGE)
         tmp = "%s.%d.%d.tmp.webp" % (out, os.getpid(), threading.get_ident())
         try:
             with CONVERT_SLOTS:
